@@ -122,10 +122,18 @@ def render_ticks() -> None:
     chart_df = chart_df.dropna(subset=["price"])
 
     if not chart_df.empty:
-        chart_df["row"] = range(len(chart_df))
-        pivot_df = chart_df.pivot(index="row", columns="ticker", values="price")
-        st.subheader("Price Chart")
-        st.line_chart(pivot_df)
+        st.subheader("Latest Prices (Easy for Screenshot)")
+        latest_prices = chart_df.groupby("ticker", as_index=False).tail(1)
+        latest_prices = latest_prices.sort_values("ticker")
+        st.bar_chart(latest_prices.set_index("ticker")["price"])
+
+        history_counts = chart_df["ticker"].value_counts()
+        has_history = bool((history_counts >= 2).any())
+        if has_history:
+            chart_df["row"] = range(len(chart_df))
+            pivot_df = chart_df.pivot(index="row", columns="ticker", values="price")
+            st.subheader("Price History")
+            st.line_chart(pivot_df)
     else:
         st.warning("No numeric price values available yet for charting.")
 
@@ -170,7 +178,11 @@ def main() -> None:
         options=tickers,
         default=tickers[:1],
     )
-    st.info("Click once, then wait. Do not spam requests because API is rate limited.")
+
+    selected_text = ", ".join(selected_tickers) if selected_tickers else "None"
+    st.markdown(f"**Selected tickers: {selected_text}**")
+    st.markdown(f"**Successful ticks received: {len(st.session_state['ticks'])}**")
+    st.info("Because the API is rate limited, click the fetch button once and wait.")
 
     if st.button("Fetch live tick from stream"):
         if not selected_tickers:
@@ -207,7 +219,7 @@ def main() -> None:
                 st.success(f"Received {success_count} live tick(s) from /api/stream.")
 
     if st.session_state["errors"]:
-        st.warning("Recent connection/API messages:")
+        st.info("Failed ticker messages:")
         for err in list(st.session_state["errors"]):
             st.write(f"- {err}")
 
