@@ -1,6 +1,5 @@
 import json
 import os
-import threading
 from collections import deque
 from datetime import datetime
 from typing import Any
@@ -9,7 +8,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from sseclient import SSEClient
-from streamlit_autorefresh import st_autorefresh
 
 BASE_URL = "https://add.piotrkojalowicz.dev"
 TICKERS_ENDPOINT = "/api/tickers"
@@ -75,35 +73,29 @@ def parse_tick(raw_data: dict[str, Any], fallback_ticker: str) -> dict[str, Any]
     return {"ticker": str(ticker), "price": price, "timestamp": ts_display}
 
 
-def stream_ticker(ticker: str, api_key: str, stop_event: threading.Event) -> None:
-    try:
-        response = requests.get(
-            f"{BASE_URL}{STREAM_ENDPOINT}",
-            headers=api_headers(api_key),
-            params={"ticker": ticker},
-            stream=True,
-            timeout=REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
+def fetch_first_tick_from_stream(ticker: str, api_key: str) -> dict[str, Any] | None:
+    response = requests.get(
+        f"{BASE_URL}{STREAM_ENDPOINT}",
+        headers=api_headers(api_key),
+        params={"ticker": ticker},
+        stream=True,
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
 
-        client = SSEClient(response)
+    client = SSEClient(response)
+    try:
         for event in client.events():
-            if stop_event.is_set():
-                break
             if not event.data:
                 continue
-
             try:
                 data = json.loads(event.data)
             except json.JSONDecodeError:
                 continue
-
-            tick = parse_tick(data, ticker)
-            with st.session_state["ticks_lock"]:
-                st.session_state["ticks"].append(tick)
-    except Exception as exc:
-        with st.session_state["ticks_lock"]:
-            st.session_state["errors"].append(f"{ticker}: {exc}")
+            return parse_tick(data, ticker)
+        return None
+    finally:
+        response.close()
 
 
 def init_state() -> None:
@@ -111,30 +103,6 @@ def init_state() -> None:
         st.session_state["ticks"] = deque(maxlen=MAX_TICKS)
     if "errors" not in st.session_state:
         st.session_state["errors"] = deque(maxlen=10)
-    if "workers" not in st.session_state:
-        st.session_state["workers"] = {}
-    if "ticks_lock" not in st.session_state:
-        st.session_state["ticks_lock"] = threading.Lock()
-
-
-def sync_stream_workers(selected_tickers: list[str], api_key: str) -> None:
-    workers = st.session_state["workers"]
-    selected_set = set(selected_tickers)
-    running_set = set(workers.keys())
-
-    for ticker in running_set - selected_set:
-        workers[ticker]["stop_event"].set()
-        del workers[ticker]
-
-    for ticker in selected_set - running_set:
-        stop_event = threading.Event()
-        thread = threading.Thread(
-            target=stream_ticker,
-            args=(ticker, api_key, stop_event),
-            daemon=True,
-        )
-        workers[ticker] = {"thread": thread, "stop_event": stop_event}
-        thread.start()
 
 
 def render_ticks() -> None:
@@ -176,7 +144,6 @@ def main() -> None:
         st.stop()
 
     init_state()
-    st_autorefresh(interval=2000, key="dashboard_refresh")
 
     try:
         tickers = fetch_tickers(api_key)
@@ -204,11 +171,38 @@ def main() -> None:
         default=tickers[:1],
     )
 
-    sync_stream_workers(selected_tickers, api_key)
-    st.write(f"Active streams: {', '.join(selected_tickers) if selected_tickers else 'None'}")
+    if st.button("Fetch live tick from stream"):
+        if not selected_tickers:
+            st.warning("Please select at least one ticker.")
+        else:
+            for ticker in selected_tickers:
+                try:
+                    tick = fetch_first_tick_from_stream(ticker, api_key)
+                    if tick is not None:
+                        st.session_state["ticks"].append(tick)
+                    else:
+                        st.session_state["errors"].append(
+                            f"{ticker}: Stream did not return a tick event."
+                        )
+                except requests.HTTPError as exc:
+                    status_code = exc.response.status_code if exc.response is not None else None
+                    if status_code == 429:
+                        st.session_state["errors"].append(
+                            f"{ticker}: Too many requests (429). Please wait and try again."
+                        )
+                    else:
+                        st.session_state["errors"].append(
+                            f"{ticker}: Stream request failed with status {status_code}."
+                        )
+                except requests.RequestException:
+                    st.session_state["errors"].append(
+                        f"{ticker}: Network/API connection issue while reading stream."
+                    )
+                except Exception as exc:
+                    st.session_state["errors"].append(f"{ticker}: Unexpected error: {exc}")
 
     if st.session_state["errors"]:
-        st.error("Connection/API errors:")
+        st.warning("Recent connection/API messages:")
         for err in list(st.session_state["errors"]):
             st.write(f"- {err}")
 
