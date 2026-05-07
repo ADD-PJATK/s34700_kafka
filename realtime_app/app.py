@@ -16,22 +16,24 @@ TICKERS_ENDPOINT = "/api/tickers"
 STREAM_ENDPOINT = "/api/stream"
 MAX_TICKS = 30
 REQUEST_TIMEOUT = 10
+TICKERS_CACHE_TTL_SECONDS = 600
 
 
 def api_headers(api_key: str) -> dict[str, str]:
     return {"X-API-Key": api_key}
 
 
-def fetch_tickers(api_key: str) -> list[str]:
-    response = requests.get(
-        f"{BASE_URL}{TICKERS_ENDPOINT}",
-        headers=api_headers(api_key),
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    payload = response.json()
-
+def _extract_tickers(payload: Any) -> list[str]:
     tickers: list[str] = []
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("tickers"), list):
+            payload = payload["tickers"]
+        elif isinstance(payload.get("data"), list):
+            payload = payload["data"]
+        else:
+            payload = []
+
     if isinstance(payload, list):
         for item in payload:
             if isinstance(item, str):
@@ -40,12 +42,20 @@ def fetch_tickers(api_key: str) -> list[str]:
                 ticker = item.get("ticker") or item.get("symbol")
                 if isinstance(ticker, str):
                     tickers.append(ticker)
-    elif isinstance(payload, dict):
-        values = payload.get("tickers", [])
-        if isinstance(values, list):
-            tickers = [value for value in values if isinstance(value, str)]
 
     return sorted(set(tickers))
+
+
+@st.cache_data(ttl=TICKERS_CACHE_TTL_SECONDS, show_spinner=False)
+def fetch_tickers(api_key: str) -> list[str]:
+    response = requests.get(
+        f"{BASE_URL}{TICKERS_ENDPOINT}",
+        headers=api_headers(api_key),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return _extract_tickers(payload)
 
 
 def parse_tick(raw_data: dict[str, Any], fallback_ticker: str) -> dict[str, Any]:
@@ -170,8 +180,18 @@ def main() -> None:
 
     try:
         tickers = fetch_tickers(api_key)
-    except requests.RequestException as exc:
-        st.error(f"Failed to load tickers from /api/tickers: {exc}")
+    except requests.HTTPError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 429:
+            st.warning(
+                "Too many requests while loading tickers (429). "
+                "Please wait a moment and try again."
+            )
+        else:
+            st.error("Failed to load tickers from /api/tickers. Please try again.")
+        st.stop()
+    except requests.RequestException:
+        st.error("Could not connect to /api/tickers. Please check your network and try again.")
         st.stop()
 
     if not tickers:
