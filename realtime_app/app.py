@@ -1,26 +1,198 @@
-"""
-Realtime stock dashboard placeholder app.
-"""
-
+import json
 import os
+import threading
+from collections import deque
+from datetime import datetime
+from typing import Any
 
+import pandas as pd
+import requests
+import streamlit as st
+from sseclient import SSEClient
+from streamlit_autorefresh import st_autorefresh
 
 BASE_URL = "https://add.piotrkojalowicz.dev"
+TICKERS_ENDPOINT = "/api/tickers"
 STREAM_ENDPOINT = "/api/stream"
+MAX_TICKS = 30
+REQUEST_TIMEOUT = 10
+
+
+def api_headers(api_key: str) -> dict[str, str]:
+    return {"X-API-Key": api_key}
+
+
+def fetch_tickers(api_key: str) -> list[str]:
+    response = requests.get(
+        f"{BASE_URL}{TICKERS_ENDPOINT}",
+        headers=api_headers(api_key),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    tickers: list[str] = []
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, str):
+                tickers.append(item)
+            elif isinstance(item, dict):
+                ticker = item.get("ticker") or item.get("symbol")
+                if isinstance(ticker, str):
+                    tickers.append(ticker)
+    elif isinstance(payload, dict):
+        values = payload.get("tickers", [])
+        if isinstance(values, list):
+            tickers = [value for value in values if isinstance(value, str)]
+
+    return sorted(set(tickers))
+
+
+def parse_tick(raw_data: dict[str, Any], fallback_ticker: str) -> dict[str, Any]:
+    ticker = raw_data.get("ticker") or raw_data.get("symbol") or fallback_ticker
+    price = raw_data.get("price")
+    ts = raw_data.get("timestamp") or raw_data.get("time")
+
+    if ts:
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            ts_display = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            ts_display = str(ts)
+    else:
+        ts_display = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return {"ticker": str(ticker), "price": price, "timestamp": ts_display}
+
+
+def stream_ticker(ticker: str, api_key: str, stop_event: threading.Event) -> None:
+    try:
+        response = requests.get(
+            f"{BASE_URL}{STREAM_ENDPOINT}",
+            headers=api_headers(api_key),
+            params={"ticker": ticker},
+            stream=True,
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+
+        client = SSEClient(response)
+        for event in client.events():
+            if stop_event.is_set():
+                break
+            if not event.data:
+                continue
+
+            try:
+                data = json.loads(event.data)
+            except json.JSONDecodeError:
+                continue
+
+            tick = parse_tick(data, ticker)
+            with st.session_state["ticks_lock"]:
+                st.session_state["ticks"].append(tick)
+    except Exception as exc:
+        with st.session_state["ticks_lock"]:
+            st.session_state["errors"].append(f"{ticker}: {exc}")
+
+
+def init_state() -> None:
+    if "ticks" not in st.session_state:
+        st.session_state["ticks"] = deque(maxlen=MAX_TICKS)
+    if "errors" not in st.session_state:
+        st.session_state["errors"] = deque(maxlen=10)
+    if "workers" not in st.session_state:
+        st.session_state["workers"] = {}
+    if "ticks_lock" not in st.session_state:
+        st.session_state["ticks_lock"] = threading.Lock()
+
+
+def sync_stream_workers(selected_tickers: list[str], api_key: str) -> None:
+    workers = st.session_state["workers"]
+    selected_set = set(selected_tickers)
+    running_set = set(workers.keys())
+
+    for ticker in running_set - selected_set:
+        workers[ticker]["stop_event"].set()
+        del workers[ticker]
+
+    for ticker in selected_set - running_set:
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=stream_ticker,
+            args=(ticker, api_key, stop_event),
+            daemon=True,
+        )
+        workers[ticker] = {"thread": thread, "stop_event": stop_event}
+        thread.start()
+
+
+def render_ticks() -> None:
+    ticks = list(st.session_state["ticks"])
+    if not ticks:
+        st.info("No live ticks yet. Select at least one ticker and wait for updates.")
+        return
+
+    ticks_df = pd.DataFrame(ticks)
+    ticks_df = ticks_df.tail(MAX_TICKS).reset_index(drop=True)
+
+    st.subheader("Recent Ticks")
+    st.dataframe(ticks_df, use_container_width=True)
+
+    chart_df = ticks_df.copy()
+    chart_df["price"] = pd.to_numeric(chart_df["price"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["price"])
+
+    if not chart_df.empty:
+        chart_df["row"] = range(len(chart_df))
+        pivot_df = chart_df.pivot(index="row", columns="ticker", values="price")
+        st.subheader("Price Chart")
+        st.line_chart(pivot_df)
+    else:
+        st.warning("No numeric price values available yet for charting.")
 
 
 def main() -> None:
+    st.set_page_config(page_title="Realtime Stock Dashboard", layout="wide")
+    st.title("Realtime Stock Dashboard")
+    st.caption("Live data from /api/stream via Server-Sent Events (SSE)")
+
     api_key = os.getenv("ADD_API_KEY")
-
     if not api_key:
-        print("Missing ADD_API_KEY environment variable.")
-        print("Create a local .env file or export ADD_API_KEY before running.")
-        return
+        st.error(
+            "Missing ADD_API_KEY environment variable. "
+            "Set it locally before running this app."
+        )
+        st.stop()
 
-    print("Realtime app placeholder")
-    print(f"Base URL: {BASE_URL}")
-    print(f"Endpoint: {STREAM_ENDPOINT}")
-    print("Next step: connect to SSE stream and render live prices.")
+    init_state()
+    st_autorefresh(interval=2000, key="dashboard_refresh")
+
+    try:
+        tickers = fetch_tickers(api_key)
+    except requests.RequestException as exc:
+        st.error(f"Failed to load tickers from /api/tickers: {exc}")
+        st.stop()
+
+    if not tickers:
+        st.warning("No tickers were returned by /api/tickers.")
+        st.stop()
+
+    selected_tickers = st.multiselect(
+        "Select one or more tickers",
+        options=tickers,
+        default=tickers[:1],
+    )
+
+    sync_stream_workers(selected_tickers, api_key)
+    st.write(f"Active streams: {', '.join(selected_tickers) if selected_tickers else 'None'}")
+
+    if st.session_state["errors"]:
+        st.error("Connection/API errors:")
+        for err in list(st.session_state["errors"]):
+            st.write(f"- {err}")
+
+    render_ticks()
 
 
 if __name__ == "__main__":

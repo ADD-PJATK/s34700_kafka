@@ -1,14 +1,53 @@
-# Realtime App
+# Realtime App (Streamlit)
 
-This app will be the live stock dashboard.
+This app is a live stock dashboard built with Python + Streamlit.
 
-## Goal
+## Features
 
-- Connect to `https://add.piotrkojalowicz.dev/api/stream` using Server-Sent Events (SSE)
-- Display live stock price updates in real time
+- Loads available tickers from `GET /api/tickers`
+- Lets you select one or more tickers
+- Streams live updates from `GET /api/stream?ticker=...` (SSE)
+- Shows ticker, price, and timestamp
+- Keeps the latest 30 ticks in memory
+- Displays a recent ticks table and simple price chart
+- Handles missing API key and API/connection errors gracefully
 
-## Security
+## Install
 
-- Read API key from environment variable: `ADD_API_KEY`
-- Send key in request header: `X-API-Key`
-- Never hardcode or commit real API keys
+```bash
+pip install -r requirements.txt
+```
+
+## Configure API Key
+
+The API key must come from an environment variable named `ADD_API_KEY`.
+
+macOS/Linux:
+
+```bash
+export ADD_API_KEY="your_key_here"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ADD_API_KEY="your_key_here"
+```
+
+## Run
+
+```bash
+streamlit run app.py
+```
+
+## API Endpoints Used
+
+- Base URL: `https://add.piotrkojalowicz.dev`
+- `GET /api/tickers`
+- `GET /api/stream?ticker=...`
+- Auth header: `X-API-Key`
+
+## Security Warning
+
+- Never hardcode your API key in source code.
+- Never commit `.env` or any file containing real secrets.

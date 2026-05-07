@@ -1,2 +1,5 @@
+streamlit
 requests
 sseclient-py
+pandas
+streamlit-autorefresh
