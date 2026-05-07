@@ -122,17 +122,28 @@ def render_ticks() -> None:
     chart_df = chart_df.dropna(subset=["price"])
 
     if not chart_df.empty:
-        st.subheader("Latest Prices (Easy for Screenshot)")
-        latest_prices = chart_df.groupby("ticker", as_index=False).tail(1)
-        latest_prices = latest_prices.sort_values("ticker")
-        st.bar_chart(latest_prices.set_index("ticker")["price"])
+        chart_df["timestamp_dt"] = pd.to_datetime(chart_df["timestamp"], errors="coerce")
+        chart_df = chart_df.sort_values("timestamp_dt")
 
-        history_counts = chart_df["ticker"].value_counts()
-        has_history = bool((history_counts >= 2).any())
-        if has_history:
+        if chart_df["timestamp_dt"].notna().any():
+            time_df = chart_df.dropna(subset=["timestamp_dt"])
+            time_pivot = (
+                time_df.groupby(["timestamp_dt", "ticker"], as_index=False)["price"]
+                .last()
+                .pivot(index="timestamp_dt", columns="ticker", values="price")
+                .sort_index()
+            )
+
+            st.subheader("Price Over Time")
+            st.line_chart(time_pivot)
+
+            # Scatter helps make 1-2 fetched ticks visible in screenshots.
+            st.subheader("Tick Points Over Time")
+            st.scatter_chart(time_pivot)
+        else:
             chart_df["row"] = range(len(chart_df))
             pivot_df = chart_df.pivot(index="row", columns="ticker", values="price")
-            st.subheader("Price History")
+            st.subheader("Price Over Time")
             st.line_chart(pivot_df)
     else:
         st.warning("No numeric price values available yet for charting.")
