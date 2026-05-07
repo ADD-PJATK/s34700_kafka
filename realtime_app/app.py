@@ -170,16 +170,19 @@ def main() -> None:
         options=tickers,
         default=tickers[:1],
     )
+    st.info("Click once, then wait. Do not spam requests because API is rate limited.")
 
     if st.button("Fetch live tick from stream"):
         if not selected_tickers:
             st.warning("Please select at least one ticker.")
         else:
+            success_count = 0
             for ticker in selected_tickers:
                 try:
                     tick = fetch_first_tick_from_stream(ticker, api_key)
                     if tick is not None:
                         st.session_state["ticks"].append(tick)
+                        success_count += 1
                     else:
                         st.session_state["errors"].append(
                             f"{ticker}: Stream did not return a tick event."
@@ -200,6 +203,8 @@ def main() -> None:
                     )
                 except Exception as exc:
                     st.session_state["errors"].append(f"{ticker}: Unexpected error: {exc}")
+            if success_count > 0:
+                st.success(f"Received {success_count} live tick(s) from /api/stream.")
 
     if st.session_state["errors"]:
         st.warning("Recent connection/API messages:")
