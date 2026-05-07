@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from sseclient import SSEClient
+from streamlit_autorefresh import st_autorefresh
 
 BASE_URL = "https://add.piotrkojalowicz.dev"
 TICKERS_ENDPOINT = "/api/tickers"
@@ -103,6 +104,8 @@ def init_state() -> None:
         st.session_state["ticks"] = deque(maxlen=MAX_TICKS)
     if "errors" not in st.session_state:
         st.session_state["errors"] = deque(maxlen=10)
+    if "auto_fetch_enabled" not in st.session_state:
+        st.session_state["auto_fetch_enabled"] = False
 
 
 def render_ticks() -> None:
@@ -134,19 +137,44 @@ def render_ticks() -> None:
                 .sort_index()
             )
 
-            st.subheader("Price Over Time")
+            st.subheader("Price Trend Over Time")
             st.line_chart(time_pivot)
-
-            # Scatter helps make 1-2 fetched ticks visible in screenshots.
-            st.subheader("Tick Points Over Time")
-            st.scatter_chart(time_pivot)
         else:
             chart_df["row"] = range(len(chart_df))
             pivot_df = chart_df.pivot(index="row", columns="ticker", values="price")
-            st.subheader("Price Over Time")
+            st.subheader("Price Trend Over Time")
             st.line_chart(pivot_df)
     else:
         st.warning("No numeric price values available yet for charting.")
+
+
+def fetch_ticks_for_selected_tickers(selected_tickers: list[str], api_key: str) -> int:
+    success_count = 0
+    for ticker in selected_tickers:
+        try:
+            tick = fetch_first_tick_from_stream(ticker, api_key)
+            if tick is not None:
+                st.session_state["ticks"].append(tick)
+                success_count += 1
+            else:
+                st.session_state["errors"].append(f"{ticker}: Stream did not return a tick event.")
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code == 429:
+                st.session_state["errors"].append(
+                    f"{ticker}: Too many requests (429). Please wait and try again."
+                )
+            else:
+                st.session_state["errors"].append(
+                    f"{ticker}: Stream request failed with status {status_code}."
+                )
+        except requests.RequestException:
+            st.session_state["errors"].append(
+                f"{ticker}: Network/API connection issue while reading stream."
+            )
+        except Exception as exc:
+            st.session_state["errors"].append(f"{ticker}: Unexpected error: {exc}")
+    return success_count
 
 
 def main() -> None:
@@ -195,39 +223,22 @@ def main() -> None:
     st.markdown(f"**Successful ticks received: {len(st.session_state['ticks'])}**")
     st.info("Because the API is rate limited, click the fetch button once and wait.")
 
-    if st.button("Fetch live tick from stream"):
+    fetch_clicked = st.button("Fetch live tick from stream")
+    if fetch_clicked:
         if not selected_tickers:
             st.warning("Please select at least one ticker.")
         else:
-            success_count = 0
-            for ticker in selected_tickers:
-                try:
-                    tick = fetch_first_tick_from_stream(ticker, api_key)
-                    if tick is not None:
-                        st.session_state["ticks"].append(tick)
-                        success_count += 1
-                    else:
-                        st.session_state["errors"].append(
-                            f"{ticker}: Stream did not return a tick event."
-                        )
-                except requests.HTTPError as exc:
-                    status_code = exc.response.status_code if exc.response is not None else None
-                    if status_code == 429:
-                        st.session_state["errors"].append(
-                            f"{ticker}: Too many requests (429). Please wait and try again."
-                        )
-                    else:
-                        st.session_state["errors"].append(
-                            f"{ticker}: Stream request failed with status {status_code}."
-                        )
-                except requests.RequestException:
-                    st.session_state["errors"].append(
-                        f"{ticker}: Network/API connection issue while reading stream."
-                    )
-                except Exception as exc:
-                    st.session_state["errors"].append(f"{ticker}: Unexpected error: {exc}")
+            st.session_state["auto_fetch_enabled"] = True
+            success_count = fetch_ticks_for_selected_tickers(selected_tickers, api_key)
             if success_count > 0:
                 st.success(f"Received {success_count} live tick(s) from /api/stream.")
+
+    if st.session_state["auto_fetch_enabled"] and selected_tickers and not fetch_clicked:
+        st.caption("Auto-updating every 10 seconds for selected tickers.")
+        st_autorefresh(interval=10_000, key="stream_auto_refresh")
+        success_count = fetch_ticks_for_selected_tickers(selected_tickers, api_key)
+        if success_count > 0:
+            st.success(f"Auto-fetched {success_count} live tick(s).")
 
     if st.session_state["errors"]:
         st.info("Failed ticker messages:")
